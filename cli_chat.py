@@ -18,7 +18,6 @@ import sys
 # TODO: If there is time, consider a chat room similar to IRCs
 # TODO: Create way to get info on incoming connections before accepting incoming chat request
 # TODO: Allow for removing contacts
-# TODO: 
 
 CONTACTS_FILE = os.path.expanduser('~/.p2p_chat/contacts.json')
 PING_INTERVAL = 3
@@ -26,13 +25,14 @@ PING_INTERVAL = 3
 
 def display_title():
     print(r"""
-   _____ _           _   ______      _     _       _   
-  / ____| |         | | |  ____|    | |   | |     | |  
- | |    | |__   __ _| |_| |__  __  _| |__ | |_ ___| |_ 
- | |    | '_ \ / _` | __|  __| \ \/ / '_ \| __/ __| __|
- | |____| | | | (_| | |_| |____ >  <| |_) | || (__| |_ 
-  \_____|_| |_|\__,_|\__|______/_/\_\_.__/ \__\___|\__|
-                                                       
+   _____ _           _   ______                              
+ / ____| |         | | |  ____|                             
+| |    | |__   __ _| |_| |__  __  ___ __  _ __ ___  ___ ___ 
+| |    | '_ \ / _` | __|  __| \ \/ / '_ \| '__/ _ \/ __/ __|
+| |____| | | | (_| | |_| |____ >  <| |_) | | |  __/\__ \__ \
+ \_____|_| |_|\__,_|\__|______/_/\_\ .__/|_|  \___||___/___/
+                                   | |                      
+                                   |_|                       
     """)
 
 class ContactManager:
@@ -106,12 +106,15 @@ class EncryptionHandler:
         plaintext = decryptor.update(ciphertext) + decryptor.finalize()
         return plaintext.decode()
 
-# Testing the heartbeat mechanism to check for valid connection
 def send_heartbeat(conn, PING_INTERVAL, pong_event):
+    '''Heartbeat mechanism to check for valid connection'''
+
     misses = 0
     while True:
         try:
             conn.sendall(b'PING')
+            pong_event.clear()
+
             if not pong_event.wait(PING_INTERVAL):
                 misses += 1
                 if misses >= 3:
@@ -121,9 +124,11 @@ def send_heartbeat(conn, PING_INTERVAL, pong_event):
             else:
                 misses = 0
 
-
         except Exception as e:
-            print(f"\n[!] Heartbeat failed: {str(e)}")
+            if "Bad file descriptor" in str(e):
+                print("\n[!] Connection closed")
+            else:
+                print(f"\n[!] Heartbeat failed: {str(e)}")
             break
 
 def handle_receive(conn, key, encryption_handler, pong_event):
@@ -140,12 +145,22 @@ def handle_receive(conn, key, encryption_handler, pong_event):
             elif data == b'PONG':
                 pong_event.set()
                 continue
+            
+            # DEBUG
+            if len(data) < 28:
+                print("\n[!] Invalid message format received")
+                continue
 
             nonce = data[:12]
             ciphertext = data[12:-16]
             tag = data[-16:]
-            decrypted = encryption_handler.decrypt_message(nonce, ciphertext, tag, key)
-            print(f"\nReceived: {decrypted}\n> ", end='')
+
+            # Decrypt and display message
+            try:
+                decrypted = encryption_handler.decrypt_message(nonce, ciphertext, tag, key)
+                print(f"\n Received: {decrypted}\n> ", end='')
+            except Exception as e:
+                print(f"\n[!] Decryption failed: {str(e)}")
         
         except Exception as e:
             print(f"\n[!] Connection error: {str(e)}")
@@ -155,28 +170,37 @@ def handle_receive(conn, key, encryption_handler, pong_event):
 
 def start_chat_session(conn, key, encryption_handler):
     pong_event = Event()
+
     receive_thread = Thread(target=handle_receive, args=(conn, key, encryption_handler, pong_event))
     heartbeat_thread = Thread(target=send_heartbeat, args = (conn, PING_INTERVAL, pong_event))   
-
+    
+    # Start our threads
     receive_thread.start()
     heartbeat_thread.start()
+    
     try:
         while True:
-            message = input("> ")
+            try:
+                message = input("> ")
+                if message.lower() == 'exit':
+                    break
+                
+                # Encrypt message
+                nonce, ciphertext, tag = encryption_handler.encrypt_message(message, key)
+                conn.sendall(nonce + ciphertext + tag)
             
-            if message.lower() == 'exit':
+            except (BrokenPipeError, ConnectionResetError):
+                print("\n[!] Connection lost")
                 break
-            
-            # Encrypt message
-            nonce, ciphertext, tag = encryption_handler.encrypt_message(message, key)
-            conn.sendall(nonce + ciphertext + tag)
-            
-    except (BrokenPipeError, ConnectionResetError):
-        print("\n[!] Connection lost")
+            except KeyboardInterrupt:
+                print("\n[!] Exiting chat session...")
+                break
+
     finally:
         conn.close()
         receive_thread.join()
         heartbeat_thread.join()
+        print("[!] Chat session ended")
 
 def listen_for_connections(ip, port, encryption_handler):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -185,11 +209,14 @@ def listen_for_connections(ip, port, encryption_handler):
         print(f"Listening on {ip}:{port}...")
         conn, addr = s.accept()
         print(f"Connected to {addr}")
+
+        # Key exchange
         private_key, public_key = encryption_handler.generate_key_pair()
         conn.sendall(encryption_handler.serialize_public_key(public_key))
         peer_public_key_bytes = conn.recv(4096)
         peer_public_key = encryption_handler.deserialize_public_key(peer_public_key_bytes)
         shared_key = encryption_handler.derive_shared_key(private_key, peer_public_key)
+
         print("Secure connection established.")
         start_chat_session(conn, shared_key, encryption_handler)
 
@@ -197,11 +224,14 @@ def connect_to_peer(ip, port, encryption_handler):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect((ip, port))
         print(f"Connected to {ip}:{port}")
+
+        # Key exhange
         private_key, public_key = encryption_handler.generate_key_pair()
         peer_public_key_bytes = s.recv(4096)
         peer_public_key = encryption_handler.deserialize_public_key(peer_public_key_bytes)
         s.sendall(encryption_handler.serialize_public_key(public_key))
         shared_key = encryption_handler.derive_shared_key(private_key, peer_public_key)
+
         print("Secure connection established.")
         start_chat_session(s, shared_key, encryption_handler)
 
@@ -210,51 +240,54 @@ def main():
     display_title()
     contact_manager = ContactManager()
     encryption_handler = EncryptionHandler()
+    
+    try:
+        while True:
+            print("\nMain Menu:")
+            print("1. Add Contact")
+            print("2. List Contacts")
+            print("3. Start Chat")
+            print("4. Quit")
+            choice = input("Choose an option: ")
 
-    while True:
-        print("\nMain Menu:")
-        print("1. Add Contact")
-        print("2. List Contacts")
-        print("3. Start Chat")
-        print("4. Quit")
-        choice = input("Choose an option: ")
-
-        if choice == '1':
-            name = input("Enter contact name: ")
-            ip = input("Enter IP address: ")
-            port = int(input("Enter port: "))
-            contact_manager.add_contact(name, ip, port)
-            print("Contact added.")
-        elif choice == '2':
-            contacts = contact_manager.list_contacts()
-            for i, contact in enumerate(contacts):
-                print(f"{i}: {contact['name']} - {contact['ip']}:{contact['port']}")
-        elif choice == '3':
-            contacts = contact_manager.list_contacts()
-            if not contacts:
-                print("No contacts available. Add a contact first.")
-                continue
-            for i, contact in enumerate(contacts):
-                print(f"{i}: {contact['name']} - {contact['ip']}:{contact['port']}")
-            contact_idx = int(input("Select contact: "))
-            if contact_idx < 0 or contact_idx >= len(contacts):
-                print("Invalid selection.")
-                continue
-            contact = contacts[contact_idx]
-            action = input("Connect (c) or Wait for connection (w)? ")
-            if action == 'c':
-                connect_to_peer(contact['ip'], contact['port'], encryption_handler)
-            elif action == 'w':
-                listen_ip = input("Enter your IP to listen on: ")
-                listen_port = int(input("Enter port to listen on: "))
-                listen_for_connections(listen_ip, listen_port, encryption_handler)
+            if choice == '1':
+                name = input("Enter contact name: ")
+                ip = input("Enter IP address: ")
+                port = int(input("Enter port: "))
+                contact_manager.add_contact(name, ip, port)
+                print("Contact added.")
+            elif choice == '2':
+                contacts = contact_manager.list_contacts()
+                for i, contact in enumerate(contacts):
+                    print(f"{i}: {contact['name']} - {contact['ip']}:{contact['port']}")
+            elif choice == '3':
+                contacts = contact_manager.list_contacts()
+                if not contacts:
+                    print("No contacts available. Add a contact first.")
+                    continue
+                for i, contact in enumerate(contacts):
+                    print(f"{i}: {contact['name']} - {contact['ip']}:{contact['port']}")
+                contact_idx = int(input("Select contact: "))
+                if contact_idx < 0 or contact_idx >= len(contacts):
+                    print("Invalid selection.")
+                    continue
+                contact = contacts[contact_idx]
+                action = input("Connect (c) or Wait for connection (w)? ")
+                if action == 'c':
+                    connect_to_peer(contact['ip'], contact['port'], encryption_handler)
+                elif action == 'w':
+                    listen_ip = input("Enter your IP to listen on: ")
+                    listen_port = int(input("Enter port to listen on: "))
+                    listen_for_connections(listen_ip, listen_port, encryption_handler)
+                else:
+                    print("Invalid choice.")
+            elif choice == '4':
+                print("Exiting...")
+                break
             else:
-                print("Invalid choice.")
-        elif choice == '4':
-            print("Exiting...")
-            break
-        else:
-            print("Invalid option.")
+                print("Invalid option.")
+    except KeyboardInterrupt:
+        print("\n[!] Exiting program...")
 
 if __name__ == "__main__":
     main()
