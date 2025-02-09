@@ -10,6 +10,15 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 import sys
 
+# TODO: Clean up the interrupts to make exiting or lost connection graceful. (Might
+#       need to ping each other every millisecond in the background to verify connection)
+# TODO: Create a way to let users know if someone is trying to connect to them. (could require
+#       persistent connection) Chat request feature?
+# TODO: If there is time, consider a chat room similar to IRCs
+# TODO: Create way to get info on incoming connections before accepting incoming chat request
+# TODO: Allow for removing contacts
+# TODO: 
+
 CONTACTS_FILE = os.path.expanduser('~/.p2p_chat/contacts.json')
 
 def display_title():
