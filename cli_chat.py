@@ -1,7 +1,8 @@
 import socket
-import threading
+from threading import Event, Thread
 import json
 import os
+import time
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -20,6 +21,8 @@ import sys
 # TODO: 
 
 CONTACTS_FILE = os.path.expanduser('~/.p2p_chat/contacts.json')
+PING_INTERVAL = 3
+
 
 def display_title():
     print(r"""
@@ -103,32 +106,77 @@ class EncryptionHandler:
         plaintext = decryptor.update(ciphertext) + decryptor.finalize()
         return plaintext.decode()
 
-def handle_receive(conn, key, encryption_handler):
+# Testing the heartbeat mechanism to check for valid connection
+def send_heartbeat(conn, PING_INTERVAL, pong_event):
+    misses = 0
+    while True:
+        try:
+            conn.sendall(b'PING')
+            if not pong_event.wait(PING_INTERVAL):
+                misses += 1
+                if misses >= 3:
+                    print("\n[!] Connection timeout. User has disconnected")
+                    conn.close()
+                    break
+            else:
+                misses = 0
+
+
+        except Exception as e:
+            print(f"\n[!] Heartbeat failed: {str(e)}")
+            break
+
+def handle_receive(conn, key, encryption_handler, pong_event):
     while True:
         try:
             data = conn.recv(4096)
             if not data:
+                print("\n[!] User has disconnected...")
                 break
+
+            if data == b'PING':
+                conn.sendall(b'PONG')
+                continue
+            elif data == b'PONG':
+                pong_event.set()
+                continue
+
             nonce = data[:12]
             ciphertext = data[12:-16]
             tag = data[-16:]
             decrypted = encryption_handler.decrypt_message(nonce, ciphertext, tag, key)
             print(f"\nReceived: {decrypted}\n> ", end='')
-        except:
+        
+        except Exception as e:
+            print(f"\n[!] Connection error: {str(e)}")
             break
+
     conn.close()
 
 def start_chat_session(conn, key, encryption_handler):
-    receive_thread = threading.Thread(target=handle_receive, args=(conn, key, encryption_handler))
+    pong_event = Event()
+    receive_thread = Thread(target=handle_receive, args=(conn, key, encryption_handler, pong_event))
+    heartbeat_thread = Thread(target=send_heartbeat, args = (conn, PING_INTERVAL, pong_event))   
+
     receive_thread.start()
-    while True:
-        message = input("> ")
-        if message.lower() == 'exit':
-            break
-        nonce, ciphertext, tag = encryption_handler.encrypt_message(message, key)
-        conn.sendall(nonce + ciphertext + tag)
-    conn.close()
-    receive_thread.join()
+    heartbeat_thread.start()
+    try:
+        while True:
+            message = input("> ")
+            
+            if message.lower() == 'exit':
+                break
+            
+            # Encrypt message
+            nonce, ciphertext, tag = encryption_handler.encrypt_message(message, key)
+            conn.sendall(nonce + ciphertext + tag)
+            
+    except (BrokenPipeError, ConnectionResetError):
+        print("\n[!] Connection lost")
+    finally:
+        conn.close()
+        receive_thread.join()
+        heartbeat_thread.join()
 
 def listen_for_connections(ip, port, encryption_handler):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -156,6 +204,7 @@ def connect_to_peer(ip, port, encryption_handler):
         shared_key = encryption_handler.derive_shared_key(private_key, peer_public_key)
         print("Secure connection established.")
         start_chat_session(s, shared_key, encryption_handler)
+
 
 def main():
     display_title()
