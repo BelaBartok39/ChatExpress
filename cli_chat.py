@@ -101,6 +101,9 @@ class EncryptionHandler:
         return (nonce, ciphertext, encryptor.tag)
 
     def decrypt_message(self, nonce, ciphertext, tag, key):
+        if len(tag) != 16:
+            raise ValueError("Invalid tag length")
+
         cipher = Cipher(algorithms.AES(key), modes.GCM(nonce, tag), backend=default_backend())
         decryptor = cipher.decryptor()
         plaintext = decryptor.update(ciphertext) + decryptor.finalize()
@@ -124,43 +127,57 @@ def send_heartbeat(conn, PING_INTERVAL, pong_event):
             else:
                 misses = 0
 
+            time.sleep(5)  # Adjust interval as needed
+            
+        except (BrokenPipeError, ConnectionResetError):
+            break
         except Exception as e:
-            if "Bad file descriptor" in str(e):
-                print("\n[!] Connection closed")
-            else:
-                print(f"\n[!] Heartbeat failed: {str(e)}")
+            print(f"\n[!] Heartbeat error: {str(e)}")
             break
 
 def handle_receive(conn, key, encryption_handler, pong_event):
+    buffer = bytearray()
     while True:
         try:
             data = conn.recv(4096)
             if not data:
                 print("\n[!] User has disconnected...")
                 break
+            buffer.extend(data)
 
-            if data == b'PING':
-                conn.sendall(b'PONG')
-                continue
-            elif data == b'PONG':
-                pong_event.set()
-                continue
-            
-            # DEBUG
-            if len(data) < 28:
-                print("\n[!] Invalid message format received")
-                continue
+            while True:
+                # Process PING/PONG
+                if len(buffer) >= 4:
+                    if buffer[:4] == b'PING':
+                        conn.sendall(b'PONG')
+                        buffer = buffer[4:]
+                        continue
+                    elif buffer == b'PONG':
+                        pong_event.set()
+                        buffer = buffer[4:]
+                        continue
+                # DEBUG
+                if len(buffer) >= 28:
+                    nonce = bytes(buffer[:12])
+                    ciphertext = bytes(buffer[12:-16])
+                    tag = bytes(buffer[-16:])
+                    
+                    if isinstance(tag, bytes) or len(tag) != 16:
+                        print("\n[!] Invalid message format - bad tag")
+                        buffer.clear()
+                        break
 
-            nonce = data[:12]
-            ciphertext = data[12:-16]
-            tag = data[-16:]
-
-            # Decrypt and display message
-            try:
-                decrypted = encryption_handler.decrypt_message(nonce, ciphertext, tag, key)
-                print(f"\n Received: {decrypted}\n> ", end='')
-            except Exception as e:
-                print(f"\n[!] Decryption failed: {str(e)}")
+                    # Decrypt and display message
+                    try:
+                        decrypted = encryption_handler.decrypt_message(nonce, ciphertext, tag, key)
+                        print(f"\n Received: {decrypted}\n> ", end='')
+                    except Exception as e:
+                        print(f"\n[!] Decryption failed: {str(e)}")
+                    
+                    buffer = buffer[28:]
+                else:
+                # Not enough data for a full message
+                    break
         
         except Exception as e:
             print(f"\n[!] Connection error: {str(e)}")
