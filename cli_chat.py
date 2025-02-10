@@ -107,9 +107,19 @@ class EncryptionHandler:
 
     @staticmethod
     def unpack_message(data):
+        if not isinstance(data, bytes):
+            raise TypeError("Message data must be bytes")
+        if len(data) < 28:
+            raise ValueError("Message too short (needs >=28 bytes)")
+
         nonce = data[:12]
-        tag = data[-16]
+        tag = data[-16:]
         ciphertext = data[12:-16]
+
+        # DEBUG checks that unpacked message is indeed bytes
+        if not all(isinstance(x, bytes) for x in (nonce, ciphertext, tag)):
+            raise TypeError("Message components must be bytes")
+
         return nonce, ciphertext, tag
 
     def decrypt_message(self, nonce, ciphertext, tag, key):
@@ -121,16 +131,16 @@ class EncryptionHandler:
         plaintext = decryptor.update(ciphertext) + decryptor.finalize()
         return plaintext.decode()
 
-def send_heartbeat(conn, PING_INTERVAL, pong_event):
-    '''Heartbeat mechanism to check for valid connection'''
-
+def send_heartbeat(conn, pong_event):
     misses = 0
     while True:
         try:
+            # Send PING as a separate packet (not mixed with encrypted data)
             conn.sendall(b'PING')
             pong_event.clear()
-
-            if not pong_event.wait(PING_INTERVAL):
+            
+            # Wait for PONG response
+            if not pong_event.wait(5):
                 misses += 1
                 if misses >= 3:
                     print("\n[!] Connection timeout. User has disconnected")
@@ -138,8 +148,8 @@ def send_heartbeat(conn, PING_INTERVAL, pong_event):
                     break
             else:
                 misses = 0
-
-            time.sleep(5)  # Adjust interval as needed
+                
+            time.sleep(5)
             
         except (BrokenPipeError, ConnectionResetError):
             break
@@ -149,8 +159,8 @@ def send_heartbeat(conn, PING_INTERVAL, pong_event):
 
 def handle_receive(conn, key, encryption_handler, pong_event):
     buffer = bytearray()
-    expected_length = -1  # -1 = waiting for new message
-    
+    expected_length = -1
+
     while True:
         try:
             data = conn.recv(4096)
@@ -160,37 +170,39 @@ def handle_receive(conn, key, encryption_handler, pong_event):
             buffer.extend(data)
 
             while True:
-                # Process control messages first
+                # Process PING/PONG messages
                 if len(buffer) >= 4 and buffer[:4] in (b'PING', b'PONG'):
-                    if buffer[:4] == b'PING':
-                        conn.sendall(b'PONG')
-                    elif buffer[:4] == b'PONG':
-                        pong_event.set()
+                    control_msg = bytes(buffer[:4])
                     buffer = buffer[4:]
-                    continue
+                    if control_msg == b'PING':
+                        conn.sendall(b'PONG')
+                    elif control_msg == b'PONG':
+                        pong_event.set()
+                    continue  # Process next message
 
-                # Handle length-prefixed messages
                 if expected_length == -1:
                     if len(buffer) >= 4:
                         expected_length = int.from_bytes(buffer[:4], 'big')
                         buffer = buffer[4:]
 
                 if expected_length != -1 and len(buffer) >= expected_length:
-                    # Extract full message
+                    # Extract and validate message
                     message_data = bytes(buffer[:expected_length])
                     buffer = buffer[expected_length:]
-                    expected_length = -1  # Reset for next message
+                    expected_length = -1  # Reset
 
-                    # Unpack and decrypt
                     try:
+                        # Attempt to decrypt
                         nonce, ciphertext, tag = EncryptionHandler.unpack_message(message_data)
                         decrypted = encryption_handler.decrypt_message(nonce, ciphertext, tag, key)
                         print(f"\nReceived: {decrypted}\n> ", end='')
+                    except (ValueError, TypeError) as e:
+                        print(f"\n[!] Invalid message: {str(e)}")
                     except Exception as e:
                         print(f"\n[!] Decryption failed: {str(e)}")
 
                 else:
-                    break  # Not enough data yet
+                    break  # Wait for more data
 
         except Exception as e:
             print(f"\n[!] Connection error: {str(e)}")
@@ -199,33 +211,25 @@ def handle_receive(conn, key, encryption_handler, pong_event):
 
 def start_chat_session(conn, key, encryption_handler):
     pong_event = Event()
-
     receive_thread = Thread(target=handle_receive, args=(conn, key, encryption_handler, pong_event))
-    heartbeat_thread = Thread(target=send_heartbeat, args = (conn, PING_INTERVAL, pong_event))   
+    heartbeat_thread = Thread(target=send_heartbeat, args=(conn, pong_event))
     
-    # Start our threads
     receive_thread.start()
     heartbeat_thread.start()
-    
+
     try:
         while True:
-            try:
-                message = input("> ")
-                if message.lower() == 'exit':
-                    break
-                
-                # Encrypt message
-                nonce, ciphertext, tag = encryption_handler.encrypt_message(message, key)
-                packed = EncryptionHandler.pack_message(nonce, ciphertext, tag)
-                conn.sendall(packed)
+            message = input("> ")
+            if message.lower() == 'exit':
+                break
             
-            except (BrokenPipeError, ConnectionResetError):
-                print("\n[!] Connection lost")
-                break
-            except KeyboardInterrupt:
-                print("\n[!] Exiting chat session...")
-                break
-
+            # Encrypt and send with length prefix
+            nonce, ciphertext, tag = encryption_handler.encrypt_message(message, key)
+            packed = EncryptionHandler.pack_message(nonce, ciphertext, tag)
+            conn.sendall(packed)
+            
+    except (BrokenPipeError, ConnectionResetError):
+        print("\n[!] Connection lost")
     finally:
         conn.close()
         receive_thread.join()
