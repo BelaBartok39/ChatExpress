@@ -99,6 +99,18 @@ class EncryptionHandler:
         encryptor = cipher.encryptor()
         ciphertext = encryptor.update(message.encode()) + encryptor.finalize()
         return (nonce, ciphertext, encryptor.tag)
+    
+    @staticmethod
+    def pack_message(nonce, ciphertext, tag):
+        message = nonce + ciphertext + tag
+        return len(message).to_bytes(4, 'big') + message
+
+    @staticmethod
+    def unpack_message(data):
+        nonce = data[:12]
+        tag = data[-16]
+        ciphertext = data[12:-16]
+        return nonce, ciphertext, tag
 
     def decrypt_message(self, nonce, ciphertext, tag, key):
         if len(tag) != 16:
@@ -137,52 +149,52 @@ def send_heartbeat(conn, PING_INTERVAL, pong_event):
 
 def handle_receive(conn, key, encryption_handler, pong_event):
     buffer = bytearray()
+    expected_length = -1  # -1 = waiting for new message
+    
     while True:
         try:
             data = conn.recv(4096)
             if not data:
-                print("\n[!] User has disconnected...")
+                print("\n[!] User has disconnected")
                 break
             buffer.extend(data)
 
             while True:
-                # Process PING/PONG
-                if len(buffer) >= 4:
+                # Process control messages first
+                if len(buffer) >= 4 and buffer[:4] in (b'PING', b'PONG'):
                     if buffer[:4] == b'PING':
                         conn.sendall(b'PONG')
-                        buffer = buffer[4:]
-                        continue
-                    elif buffer == b'PONG':
+                    elif buffer[:4] == b'PONG':
                         pong_event.set()
-                        buffer = buffer[4:]
-                        continue
-                # DEBUG
-                if len(buffer) >= 28:
-                    nonce = bytes(buffer[:12])
-                    ciphertext = bytes(buffer[12:-16])
-                    tag = bytes(buffer[-16:])
-                    
-                    if isinstance(tag, bytes) or len(tag) != 16:
-                        print("\n[!] Invalid message format - bad tag")
-                        buffer.clear()
-                        break
+                    buffer = buffer[4:]
+                    continue
 
-                    # Decrypt and display message
+                # Handle length-prefixed messages
+                if expected_length == -1:
+                    if len(buffer) >= 4:
+                        expected_length = int.from_bytes(buffer[:4], 'big')
+                        buffer = buffer[4:]
+
+                if expected_length != -1 and len(buffer) >= expected_length:
+                    # Extract full message
+                    message_data = bytes(buffer[:expected_length])
+                    buffer = buffer[expected_length:]
+                    expected_length = -1  # Reset for next message
+
+                    # Unpack and decrypt
                     try:
+                        nonce, ciphertext, tag = EncryptionHandler.unpack_message(message_data)
                         decrypted = encryption_handler.decrypt_message(nonce, ciphertext, tag, key)
-                        print(f"\n Received: {decrypted}\n> ", end='')
+                        print(f"\nReceived: {decrypted}\n> ", end='')
                     except Exception as e:
                         print(f"\n[!] Decryption failed: {str(e)}")
-                    
-                    buffer = buffer[28:]
+
                 else:
-                # Not enough data for a full message
-                    break
-        
+                    break  # Not enough data yet
+
         except Exception as e:
             print(f"\n[!] Connection error: {str(e)}")
             break
-
     conn.close()
 
 def start_chat_session(conn, key, encryption_handler):
@@ -204,7 +216,8 @@ def start_chat_session(conn, key, encryption_handler):
                 
                 # Encrypt message
                 nonce, ciphertext, tag = encryption_handler.encrypt_message(message, key)
-                conn.sendall(nonce + ciphertext + tag)
+                packed = EncryptionHandler.pack_message(nonce, ciphertext, tag)
+                conn.sendall(packed)
             
             except (BrokenPipeError, ConnectionResetError):
                 print("\n[!] Connection lost")
