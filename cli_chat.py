@@ -295,19 +295,20 @@ def main():
                 for i, contact in enumerate(contacts):
                     print(f"{i}: {contact['name']} - {contact['ip']}:{contact['port']}")
             elif choice == '3':
-                contacts = contact_manager.list_contacts()
-                if not contacts:
-                    print("No contacts available. Add a contact first.")
-                    continue
-                for i, contact in enumerate(contacts):
-                    print(f"{i}: {contact['name']} - {contact['ip']}:{contact['port']}")
-                contact_idx = int(input("Select contact: "))
-                if contact_idx < 0 or contact_idx >= len(contacts):
-                    print("Invalid selection.")
-                    continue
-                contact = contacts[contact_idx]
                 action = input("Connect (c) or Wait for connection (w)? ")
                 if action == 'c':
+
+                    contacts = contact_manager.list_contacts()
+                    if not contacts:
+                        print("No contacts available. Add a contact first.")
+                        continue
+                    for i, contact in enumerate(contacts):
+                        print(f"{i}: {contact['name']} - {contact['ip']}:{contact['port']}")
+                    contact_idx = int(input("Select contact: "))
+                    if contact_idx < 0 or contact_idx >= len(contacts):
+                        print("Invalid selection.")
+                        continue
+                    contact = contacts[contact_idx]
                     connect_to_peer(contact['ip'], contact['port'], encryption_handler)
                 elif action == 'w':
                     listen_ip = input("Enter your IP to listen on: ")
