@@ -279,9 +279,10 @@ def main():
         while True:
             print("\nMain Menu:")
             print("1. Add Contact")
-            print("2. List Contacts")
-            print("3. Start Chat")
-            print("4. Quit")
+            print("2. Remove Contact")
+            print("3. List Contacts")
+            print("4. Start Chat")
+            print("5. Quit")
             choice = input("Choose an option: ")
 
             if choice == '1':
@@ -290,11 +291,28 @@ def main():
                 port = int(input("Enter port: "))
                 contact_manager.add_contact(name, ip, port)
                 print("Contact added.")
+            
             elif choice == '2':
                 contacts = contact_manager.list_contacts()
-                for i, contact in enumerate(contacts):
-                    print(f"{i}: {contact['name']} - {contact['ip']}:{contact['port']}")
+                if len(contacts) == 0:
+                    for i, contact in enumerate(contacts):
+                        print(f"{i}: {contact['name']} - {contact['ip']}:{contact['port']}")
+                else:
+                    to_remove = input("Select contact to remove: ")
+                    if to_remove.isalpha() ==  True:
+                        print("Select number of contact: ")
+                    else:
+                        contact_manager.delete_contact(int(to_remove))
+                
             elif choice == '3':
+                contacts = contact_manager.list_contacts()
+                if len(contacts) is 0:
+                    print("Contact list is empty.")
+                else:
+                    for i, contact in enumerate(contacts):
+                        print(f"{i}: {contact['name']} - {contact['ip']}:{contact['port']}")
+            
+            elif choice == '4':
                 action = input("Connect (c) or Wait for connection (w)? ")
                 if action == 'c':
 
@@ -304,21 +322,25 @@ def main():
                         continue
                     for i, contact in enumerate(contacts):
                         print(f"{i}: {contact['name']} - {contact['ip']}:{contact['port']}")
+                    
                     contact_idx = int(input("Select contact: "))
                     if contact_idx < 0 or contact_idx >= len(contacts):
                         print("Invalid selection.")
                         continue
                     contact = contacts[contact_idx]
                     connect_to_peer(contact['ip'], contact['port'], encryption_handler)
+                
                 elif action == 'w':
                     listen_ip = input("Enter your IP to listen on: ")
                     listen_port = int(input("Enter port to listen on: "))
                     listen_for_connections(listen_ip, listen_port, encryption_handler)
                 else:
                     print("Invalid choice.")
-            elif choice == '4':
+            
+            elif choice == '5':
                 print("Exiting...")
                 break
+            
             else:
                 print("Invalid option.")
     except KeyboardInterrupt:
